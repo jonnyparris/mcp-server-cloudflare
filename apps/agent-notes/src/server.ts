@@ -133,7 +133,7 @@ function memoryTool<Shape extends ZodRawShape>(
 		async (args, accountId): Promise<CallToolResult> => {
 			try {
 				const props = requireRequestProps(context)
-				const userCtx = buildUserContext(context.env, props, accountId)
+				const userCtx = buildUserContext(context.env, props, accountId, context.executionCtx)
 				const result = await handler(args as z.infer<z.ZodObject<Shape>>, userCtx)
 				if (typeof result === 'string') {
 					return { content: [{ type: 'text', text: result }] }
@@ -724,7 +724,7 @@ export function registerMemoryTools(context: McpRegistrationContext<Env>): void 
 		'Run an agentic reflection over your memory now: a quick scan auto-applies low-risk fixes (typos, whitespace), while deep analysis stages substantive improvements for review. Reflection is opt-out — disable it with set_config { reflectionsEnabled: false }. All LLM spend is billed to your Cloudflare account.',
 		{},
 		async (_args, userCtx) => {
-			const result = await runReflection(userCtx)
+			const result = await runReflection(userCtx, userCtx.executionCtx)
 			if (!result.success) return errResult('Reflection failed', result)
 			return okResult(result, result.skipped ? 'Reflection skipped' : 'Reflection complete')
 		}

@@ -28,6 +28,8 @@ export interface UserContext {
 	ai: AiRunner
 	index: MemoryIndexClient
 	env: Env
+	/** Worker execution context, used to finish webhook delivery after the response. */
+	executionCtx?: ExecutionContext
 }
 
 /** Stable identity used only for session metrics. */
@@ -35,7 +37,12 @@ export function userIdFromProps(props: AuthProps): string {
 	return props.type === 'user_token' ? props.user.id : props.account.id
 }
 
-export function buildUserContext(env: Env, props: AuthProps, accountId: string): UserContext {
+export function buildUserContext(
+	env: Env,
+	props: AuthProps,
+	accountId: string,
+	executionCtx?: ExecutionContext
+): UserContext {
 	const creds: CloudflareCredentials = { accountId, apiToken: props.accessToken }
 	const storage = createRestR2Storage(creds, env.AGENT_NOTES_BUCKET_NAME)
 	const ai = new RestAiRunner(creds)
@@ -43,5 +50,5 @@ export function buildUserContext(env: Env, props: AuthProps, accountId: string):
 	// must use the same account boundary. Keying by user would mix accounts for
 	// multi-account users and create divergent indexes for account members.
 	const index = new MemoryIndexClient(env, accountId, creds)
-	return { accountId, creds, storage, ai, index, env }
+	return { accountId, creds, storage, ai, index, env, executionCtx }
 }

@@ -73,7 +73,7 @@ If your client does not yet support remote MCP servers, use [mcp-remote](https:/
 ```json
 {
 	"mcpServers": {
-		"cloudflare-memory": {
+		"cloudflare-notes": {
 			"command": "npx",
 			"args": ["mcp-remote", "https://notes.mcp.cloudflare.com/mcp"]
 		}
