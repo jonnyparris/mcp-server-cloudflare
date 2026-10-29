@@ -4,6 +4,12 @@ This is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/introdu
 
 It integrates tools for running a sandbox container with your MCP client. With this server you can allow your LLM to run arbitrary code, such as Node or Python, in a secure, sandboxed environment.
 
+The `/mcp` URL uses a stateless SDK v2 handler that creates a fresh server for every request. The retired `/sse` URL returns `410 Gone` pointing at `/mcp`. `UserContainer` and `ContainerManager` remain application Durable Objects for per-user container lifecycle and capacity management; there is no MCP protocol session or protocol Durable Object.
+
+Each user's sandbox is a Container controlled by their `UserContainer` Durable Object through the native `ctx.container` API, with the `durable_object` [scheduling policy](https://developers.cloudflare.com/containers/configuration/scheduling-policy/). Every tool runs as a process with `ctx.container.exec()`; the container itself runs no server.
+
+Sandboxes start from a [snapshot](https://developers.cloudflare.com/containers/guides/snapshots/) of the Cloudflare-managed `cloudflare/debian-trixie` image with Python, pip, git, build tools and pnpm installed. One `UserContainer` instance, `__sandbox-template__`, builds that snapshot the first time a sandbox starts and keeps the handle (`server/sandboxTemplate.ts`). Every restore refreshes the snapshot's 30-day lifetime; if a restore fails, for example because the snapshot expired, the template is rebuilt.
+
 ## Tools
 
 | **Category**            | **Tool**                | **Description**                                                                                                                       |
@@ -24,25 +30,8 @@ This MCP server is still a work in progress, and we plan to add more tools in th
 - `Clone and explore this github repo: [repo link]. Setup and run the tests in your development environment`
 - `Analyze this data using Python`
 
-## Access the remote MCP server from any MCP Client
+## Connect to the MCP server
 
-If your MCP client has first class support for remote MCP servers, the client will provide a way to accept the server URL (`https://containers.mcp.cloudflare.com`) directly within its interface (for example in [Cloudflare AI Playground](https://playground.ai.cloudflare.com/)).
-
-If your client does not yet support remote MCP servers, you will need to set up its respective configuration file using [mcp-remote](https://www.npmjs.com/package/mcp-remote) to specify which servers your client can access.
-
-Replace the content with the following configuration:
-
-```json
-{
-	"mcpServers": {
-		"cloudflare": {
-			"command": "npx",
-			"args": ["mcp-remote", "https://containers.mcp.cloudflare.com/mcp"]
-		}
-	}
-}
-```
-
-Once you've set up your configuration file, restart MCP client and a browser window will open showing your OAuth login page. Proceed through the authentication flow to grant the client access to your MCP server. After you grant access, the tools will become available for you to use.
+Connect your MCP client directly to `https://containers.mcp.cloudflare.com/mcp`. If prompted, complete the Cloudflare OAuth flow in your browser. The tools become available after authorization.
 
 Interested in contributing, and running this server locally? See [CONTRIBUTING.md](CONTRIBUTING.md) to get started.

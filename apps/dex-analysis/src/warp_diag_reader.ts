@@ -1,11 +1,9 @@
 import { DurableObject } from 'cloudflare:workers'
 import JSZip from 'jszip'
 
-import { getEnv } from '@repo/mcp-common/src/env'
+import { cloudflareFetch } from '@repo/mcp-common/src/user-agent'
 
 import { type Env } from './dex-analysis.context'
-
-const env = getEnv<Env>()
 
 // Helper for reading large WARP diag zip archives.
 // Holds the contents in memory between requests from the agent for specific files
@@ -74,13 +72,13 @@ export class WarpDiagReader extends DurableObject<Env> {
 			Authorization: `Bearer ${accessToken}`,
 		}
 
-		if (env.DEV_DISABLE_OAUTH) {
+		if (this.env.DEV_DISABLE_OAUTH) {
 			headers = {
-				Authorization: `Bearer ${env.DEV_CLOUDFLARE_API_TOKEN}`,
+				Authorization: `Bearer ${this.env.DEV_CLOUDFLARE_API_TOKEN}`,
 			}
 		}
 
-		const res = await fetch(url, { headers })
+		const res = await cloudflareFetch(url, { headers })
 
 		if (res.status !== 200) {
 			throw new Error(`failed to download zip, non-200 status code: ${res.status}`)
@@ -121,15 +119,18 @@ async function readerName({
 	return (await hashToken(accessToken)) + deviceId + commandId
 }
 
-export async function getReader({
-	accessToken,
-	deviceId,
-	commandId,
-}: {
-	accessToken: string
-	deviceId: string
-	commandId: string
-}) {
+export async function getReader(
+	env: Env,
+	{
+		accessToken,
+		deviceId,
+		commandId,
+	}: {
+		accessToken: string
+		deviceId: string
+		commandId: string
+	}
+) {
 	const name = await readerName({ accessToken, deviceId, commandId })
 	const id = env.WARP_DIAG_READER.idFromName(name)
 	return env.WARP_DIAG_READER.get(id)

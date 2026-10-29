@@ -6,6 +6,8 @@ connections, with Cloudflare OAuth built-in.
 It integrates tools powered by the [Cloudflare Browser Run API](https://developers.cloudflare.com/browser-run/) to fetch
 web pages, convert them to markdown, and take screenshots.
 
+The `/mcp` URL uses a stateless SDK v2 handler that creates a fresh server with request-scoped auth/account context for every request. The retired `/sse` URL returns `410 Gone` pointing at `/mcp`. OAuth grants and token validation remain durable security state; the server stores no MCP protocol session. The Browser Run session tools below manage application-level browser sessions, not MCP protocol sessions.
+
 ## 🔨 Available Tools
 
 Currently available tools:
@@ -26,6 +28,8 @@ Currently available tools:
 | `list_browser_sessions` | Lists active Browser Run sessions for the account.                                  |
 | `kill_browser_session`  | Closes (kills) a Browser Run session by its session ID.                             |
 
+**Browser selection:** The page tools (`get_url_*`, `scrape_url_elements`, and `start_crawl`) accept an optional `browser` argument. Omit it to use the default Chrome browser. Set it to `kitesurf` to render the page with the Kitesurf browser engine. `start_crawl` accepts `kitesurf` only when `render` is `true`.
+
 **Note:** These tools are account-scoped. Single-account credentials (and account-scoped API tokens) are detected automatically. If your credentials can access multiple accounts, pass `account_id` to the tool, or set a `cf-account-id` request header in your MCP client config.
 
 This MCP server is still a work in progress, and we plan to add more tools in the future.
@@ -35,31 +39,15 @@ This MCP server is still a work in progress, and we plan to add more tools in th
 - `Get the HTML content of https://example.com.`
 - `Convert https://example.com to Markdown.`
 - `Take a screenshot of https://example.com.`
+- `Take a screenshot of https://example.com with the kitesurf browser.`
 - `Render https://example.com to a PDF.`
 - `Extract the product name and price from https://example.com as JSON.`
 - `List all the links on https://example.com.`
 - `Crawl https://example.com two levels deep and give me the results.`
 - `List my active browser sessions and kill the oldest one.`
 
-## Access the remote MCP server from any MCP Client
+## Connect to the MCP server
 
-If your MCP client has first class support for remote MCP servers, the client will provide a way to accept the server URL (`https://browser.mcp.cloudflare.com`) directly within its interface (for example in[Cloudflare AI Playground](https://playground.ai.cloudflare.com/)).
-
-If your client does not yet support remote MCP servers, you will need to set up its respective configuration file using mcp-remote (https://www.npmjs.com/package/mcp-remote) to specify which servers your client can access.
-
-Replace the content with the following configuration:
-
-```json
-{
-	"mcpServers": {
-		"cloudflare": {
-			"command": "npx",
-			"args": ["mcp-remote", "https://browser.mcp.cloudflare.com/mcp"]
-		}
-	}
-}
-```
-
-Once you've set up your configuration file, restart MCP client and a browser window will open showing your OAuth login page. Proceed through the authentication flow to grant the client access to your MCP server. After you grant access, the tools will become available for you to use.
+Connect your MCP client directly to `https://browser.mcp.cloudflare.com/mcp`. If prompted, complete the Cloudflare OAuth flow in your browser. The tools become available after authorization.
 
 Interested in contributing, and running this server locally? See [CONTRIBUTING.md](CONTRIBUTING.md) to get started.

@@ -1,0 +1,28 @@
+{
+	"name": "agent-notes",
+	"version": "0.1.0",
+	"private": true,
+	"scripts": {
+		"check:lint": "run-eslint-workers",
+		"check:types": "run-tsc",
+		"deploy": "run-wrangler-deploy",
+		"deploy:staging": "wrangler deploy --env staging",
+		"deploy:production": "wrangler deploy --env production",
+		"dev": "wrangler dev",
+		"start": "wrangler dev",
+		"types": "wrangler types",
+		"test": "vitest run"
+	},
+	"devDependencies": {
+		"@cloudflare/vitest-pool-workers": "0.16.11",
+		"@types/node": "22.15.17",
+		"typescript": "5.5.4",
+		"vitest": "4.1.8",
+		"wrangler": "4.149.0"
+	},
+	"dependencies": {
+		"@repo/mcp-common": "workspace:*",
+		"zod": "4.4.3"
+	},
+	"type": "module"
+}

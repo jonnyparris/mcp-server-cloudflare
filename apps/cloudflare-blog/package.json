@@ -1,6 +1,6 @@
 {
 	"name": "cloudflare-blog",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"private": true,
 	"scripts": {
 		"check:lint": "run-eslint-workers",
@@ -8,19 +8,11 @@
 		"deploy": "run-wrangler-deploy",
 		"dev": "wrangler dev",
 		"start": "npm run dev",
-		"types": "wrangler types",
+		"types": "wrangler types --include-runtime false",
 		"test": "vitest run"
 	},
 	"dependencies": {
-		"@cloudflare/workers-oauth-provider": "0.7.0",
-		"@hono/zod-validator": "0.4.3",
-		"@modelcontextprotocol/sdk": "1.29.0",
 		"@repo/mcp-common": "workspace:*",
-		"@repo/mcp-observability": "workspace:*",
-		"agents": "0.13.3",
-		"cloudflare": "4.2.0",
-		"hono": "4.7.6",
-		"mime": "4.0.6",
 		"zod": "4.4.3"
 	},
 	"devDependencies": {
@@ -29,7 +21,7 @@
 		"prettier": "3.5.3",
 		"typescript": "5.5.4",
 		"vitest": "4.1.8",
-		"wrangler": "4.96.0"
+		"wrangler": "4.149.0"
 	},
 	"type": "module"
 }

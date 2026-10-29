@@ -11,6 +11,7 @@ export interface TestEnv extends Env {
 export default defineConfig({
 	plugins: [
 		cloudflareTest({
+			remoteBindings: false,
 			wrangler: { configPath: `${__dirname}/wrangler.jsonc` },
 			miniflare: {
 				bindings: {
@@ -21,5 +22,7 @@ export default defineConfig({
 		}),
 	],
 
-	test: {},
+	test: {
+		setupFiles: ['@repo/mcp-common/src/test/msw-setup.ts'],
+	},
 })

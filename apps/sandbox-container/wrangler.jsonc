@@ -7,18 +7,13 @@
 	"containers": [
 		{
 			"name": "sandbox-container",
-			"image": "./Dockerfile",
 			"class_name": "UserContainer",
-			"max_instances": 2,
-			"rollout_step_percentage": 100
+			// UserContainer starts each sandbox from a snapshot of the managed cloudflare/debian-trixie image.
+			"scheduling_policy": "durable_object"
 		}
 	],
 	"durable_objects": {
 		"bindings": [
-			{
-				"class_name": "ContainerMcpAgent",
-				"name": "MCP_OBJECT"
-			},
 			{
 				"class_name": "ContainerManager",
 				"name": "CONTAINER_MANAGER"
@@ -37,6 +32,10 @@
 		{
 			"new_sqlite_classes": ["UserContainer"],
 			"tag": "v2"
+		},
+		{
+			"deleted_classes": ["ContainerMcpAgent"],
+			"tag": "v3"
 		}
 	],
 	"observability": {
@@ -83,20 +82,13 @@
 			"containers": [
 				{
 					"name": "sandbox-container-staging",
-					// UPDATE WHEN DEPLOYING A NEW IMAGE
-					"image": "registry.cloudchamber.cfdata.org/sandbox-container:d802004",
 					"class_name": "UserContainer",
-					"max_instances": 5,
-					"rollout_step_percentage": 100,
-					"instances": 3
+					// UserContainer starts each sandbox from a snapshot of the managed cloudflare/debian-trixie image.
+					"scheduling_policy": "durable_object"
 				}
 			],
 			"durable_objects": {
 				"bindings": [
-					{
-						"class_name": "ContainerMcpAgent",
-						"name": "MCP_OBJECT"
-					},
 					{
 						"class_name": "ContainerManager",
 						"name": "CONTAINER_MANAGER"
@@ -136,20 +128,13 @@
 			"containers": [
 				{
 					"name": "sandbox-container",
-					// UPDATE WHEN DEPLOYING A NEW IMAGE
-					"image": "registry.cloudchamber.cfdata.org/sandbox-container:d802004",
 					"class_name": "UserContainer",
-					"max_instances": 50,
-					"rollout_step_percentage": 100,
-					"instances": 10
+					// UserContainer starts each sandbox from a snapshot of the managed cloudflare/debian-trixie image.
+					"scheduling_policy": "durable_object"
 				}
 			],
 			"durable_objects": {
 				"bindings": [
-					{
-						"class_name": "ContainerMcpAgent",
-						"name": "MCP_OBJECT"
-					},
 					{
 						"class_name": "ContainerManager",
 						"name": "CONTAINER_MANAGER"

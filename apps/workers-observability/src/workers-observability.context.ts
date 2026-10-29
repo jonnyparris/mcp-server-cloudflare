@@ -1,5 +1,3 @@
-import type { ObservabilityMCP } from './workers-observability.app'
-
 export interface Env {
 	OAUTH_KV: KVNamespace
 	MCP_COOKIE_ENCRYPTION_KEY: string
@@ -8,13 +6,12 @@ export interface Env {
 	MCP_SERVER_VERSION: string
 	CLOUDFLARE_CLIENT_ID: string
 	CLOUDFLARE_CLIENT_SECRET: string
-	MCP_OBJECT: DurableObjectNamespace<ObservabilityMCP>
 	MCP_METRICS: AnalyticsEngineDataset
 	SENTRY_ACCESS_CLIENT_ID: string
 	SENTRY_ACCESS_CLIENT_SECRET: string
 	GIT_HASH: string
 	SENTRY_DSN: string
-	AI: Ai
+	DOCS_AI_SEARCH: AiSearchInstance
 	VECTORIZE: VectorizeIndex
 	DEV_DISABLE_OAUTH: string
 	DEV_CLOUDFLARE_API_TOKEN: string

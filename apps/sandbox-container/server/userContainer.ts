@@ -1,45 +1,143 @@
 import { DurableObject } from 'cloudflare:workers'
+import mime from 'mime'
 
-import { OPEN_CONTAINER_PORT } from '../shared/consts'
-import { MAX_CONTAINERS, proxyFetch, startAndWaitForPort } from './containerHelpers'
-import { getContainerManager } from './containerManager'
-import { fileToBase64 } from './utils'
+import { getContainerManager, MAX_CONTAINERS } from './containerManager'
+import {
+	BASE_IMAGE,
+	getTemplateContainer,
+	KEEP_ALIVE_ENTRYPOINT,
+	TEMPLATE_SETUP,
+	TEMPLATE_VERSION,
+} from './sandboxTemplate'
+import { bytesToBase64, toWorkdirPath } from './utils'
 
-import type { ExecParams, FileList, FileWrite } from '../shared/schema'
+import type { ExecParams, FileWrite } from '../shared/schema'
 import type { Env } from './sandbox.server.context'
 
+/** Where commands run and file paths resolve. The template creates it. */
+const WORKDIR = '/workdir'
+/** Matches the old application's instance size: 1/16 vCPU, 256 MiB, 2 GB disk. */
+const INSTANCE = 'lite'
+/** Stop a container nobody has used for this long. The ContainerManager reaps at 15 minutes. */
+const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000
+const DEFAULT_EXEC_TIMEOUT_MS = 2 * 60 * 1000
+const MAX_EXEC_TIMEOUT_MS = 10 * 60 * 1000
+/** Extra time the Worker waits past a command's own timeout before giving up on it. */
+const EXEC_TIMEOUT_BACKSTOP_MS = 5 * 1000
+/** Exit status of a process killed by SIGKILL (128 + 9). */
+const SIGKILL_EXIT_CODE = 137
+/** exec() processes get only PATH from the image, so give them the rest of a usual shell. */
+const EXEC_ENV = { HOME: '/root', LANG: 'C.UTF-8' }
+/** There is no MIME type for a directory; Claude accepts this one. */
+const DIRECTORY_CONTENT_TYPE = 'text/directory'
+/** After the process exits, stop reading once its pipes have been quiet this long. */
+const OUTPUT_GRACE_MS = 250
+const START_ATTEMPTS = 20
+const START_RETRY_DELAY_MS = 500
+/** The template build installs packages, so it gets more CPU than a sandbox and a long timeout. */
+const TEMPLATE_BUILD_INSTANCE = 'standard-1'
+const TEMPLATE_SETUP_TIMEOUT_MS = 10 * 60 * 1000
+const TEMPLATE_STORAGE_KEY = `template-snapshot-v${TEMPLATE_VERSION}`
+
+type StartOptions = { containerSnapshot: ContainerSnapshot } | { image: string }
+type InstanceType = typeof INSTANCE | typeof TEMPLATE_BUILD_INSTANCE
+type SandboxStartOptions = StartOptions & {
+	instance: InstanceType
+	enableInternet: boolean
+	entrypoint: string[]
+}
+
+type RunResult = { exitCode: number; stdout: Uint8Array; stderr: string }
+type FileContents =
+	| { type: 'text'; textOutput: string; mimeType: string | undefined }
+	| { type: 'base64'; base64Output: string; mimeType: string | undefined }
+
+/** Read a stream into memory until it ends or is cancelled. */
+function collectStream(stream: ReadableStream | null): {
+	done: Promise<void>
+	cancel: () => void
+	bytes: () => Uint8Array
+	lastChunkAt: () => number
+} {
+	const chunks: Uint8Array[] = []
+	let lastChunkAt = Date.now()
+	if (!stream) {
+		return {
+			done: Promise.resolve(),
+			cancel: () => {},
+			bytes: () => new Uint8Array(),
+			lastChunkAt: () => 0,
+		}
+	}
+	const reader = stream.getReader()
+	const done = (async () => {
+		try {
+			for (;;) {
+				const { value, done } = await reader.read()
+				if (done) {
+					return
+				}
+				chunks.push(value as Uint8Array)
+				lastChunkAt = Date.now()
+			}
+		} catch {
+			// Cancelled, or the process went away; keep what arrived.
+		}
+	})()
+	return {
+		done,
+		cancel: () => void reader.cancel().catch(() => {}),
+		lastChunkAt: () => lastChunkAt,
+		bytes: () => {
+			const result = new Uint8Array(chunks.reduce((size, chunk) => size + chunk.length, 0))
+			let offset = 0
+			for (const chunk of chunks) {
+				result.set(chunk, offset)
+				offset += chunk.length
+			}
+			return result
+		},
+	}
+}
+
+/** Decode bytes as UTF-8, or undefined if they aren't valid UTF-8 (so are likely binary). */
+function decodeUtf8(bytes: Uint8Array): string | undefined {
+	try {
+		return new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes)
+	} catch {
+		return undefined
+	}
+}
+
 export class UserContainer extends DurableObject<Env> {
-	constructor(
-		ctx: DurableObjectState,
-		public env: Env
-	) {
-		console.log('creating user container DO')
+	/** On the template instance: the build in progress, shared by concurrent callers. */
+	private templateBuild: Promise<ContainerSnapshot> | undefined
+
+	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env)
-	}
-
-	async destroyContainer(): Promise<void> {
-		await this.ctx.container?.destroy()
-	}
-
-	async killContainer(): Promise<void> {
-		console.log('Reaping container')
-		const containerManager = getContainerManager(this.env)
-		const active = await containerManager.listActive()
-		if (this.ctx.id.toString() in active) {
-			console.log('killing container')
-			await this.destroyContainer()
-			await containerManager.killContainer(this.ctx.id.toString())
+		// A Durable Object restart drops the timeout, so set it again on a container that kept running.
+		const container = ctx.container
+		if (container?.running) {
+			void ctx.blockConcurrencyWhile(() => container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS))
 		}
 	}
 
+	async destroyContainer(): Promise<void> {
+		if (this.ctx.container?.running) {
+			await this.ctx.container.destroy()
+		}
+	}
+
+	async killContainer(): Promise<void> {
+		await this.destroyContainer()
+		await getContainerManager(this.env).killContainer(this.ctx.id.toString())
+	}
+
 	async container_initialize(): Promise<string> {
-		// kill container
 		await this.killContainer()
 
-		// try to cleanup cleanup old containers
+		// The durable_object scheduling policy has no max_instances, so the manager enforces the cap.
 		const containerManager = getContainerManager(this.env)
-
-		// if more than half of our containers are being used, let's try reaping
 		if ((await containerManager.listActive()).length >= MAX_CONTAINERS / 2) {
 			await containerManager.tryKillOldContainers()
 			if ((await containerManager.listActive()).length >= MAX_CONTAINERS) {
@@ -49,133 +147,306 @@ export class UserContainer extends DurableObject<Env> {
 			}
 		}
 
-		// start container
-		let startedContainer = false
-		await this.ctx.blockConcurrencyWhile(async () => {
-			startedContainer = await startAndWaitForPort(
-				this.env.ENVIRONMENT,
-				this.ctx.container,
-				OPEN_CONTAINER_PORT
-			)
-		})
-		if (!startedContainer) {
-			throw new Error('Failed to start container')
+		// Fetched outside blockConcurrencyWhile: the first build can outlast its 30 second limit.
+		const template = getTemplateContainer(this.env)
+		const snapshot = await template.getTemplateSnapshot()
+		const error = await this.startBlockingRequests({ containerSnapshot: snapshot })
+		if (error !== undefined) {
+			// The snapshot may have expired after 30 days without a restore. Rebuild it once.
+			console.error('Starting from the template snapshot failed, rebuilding it', error)
+			await template.discardTemplateSnapshot(snapshot.id)
+			const rebuilt = await template.getTemplateSnapshot()
+			const retryError = await this.startBlockingRequests({ containerSnapshot: rebuilt })
+			if (retryError !== undefined) {
+				throw new Error(`Failed to start container: ${String(retryError)}`)
+			}
 		}
-
-		// track and manage lifecycle
 		await containerManager.trackContainer(this.ctx.id.toString())
 
-		return `Created new container`
+		return 'Created new container'
+	}
+
+	/**
+	 * Called on the template instance. Returns the snapshot user sandboxes start from, building it
+	 * from BASE_IMAGE first if this TEMPLATE_VERSION has none.
+	 */
+	async getTemplateSnapshot(): Promise<ContainerSnapshot> {
+		const stored = await this.ctx.storage.get<ContainerSnapshot>(TEMPLATE_STORAGE_KEY)
+		if (stored) {
+			return stored
+		}
+		this.templateBuild ??= this.buildTemplateSnapshot().finally(() => {
+			this.templateBuild = undefined
+		})
+		return this.templateBuild
+	}
+
+	/** Called on the template instance. Forgets a snapshot that no longer restores. */
+	async discardTemplateSnapshot(id: string): Promise<void> {
+		const stored = await this.ctx.storage.get<ContainerSnapshot>(TEMPLATE_STORAGE_KEY)
+		if (stored?.id === id) {
+			await this.ctx.storage.delete(TEMPLATE_STORAGE_KEY)
+		}
+	}
+
+	private async buildTemplateSnapshot(): Promise<ContainerSnapshot> {
+		const container = this.requireContainer()
+		await this.destroyContainer()
+		const startError = await this.startContainer({ image: BASE_IMAGE }, TEMPLATE_BUILD_INSTANCE)
+		if (startError !== undefined) {
+			throw new Error(`Failed to start the template container: ${String(startError)}`)
+		}
+		try {
+			const setup = await this.run(['sh', '-c', TEMPLATE_SETUP], {
+				cwd: '/',
+				timeoutMs: TEMPLATE_SETUP_TIMEOUT_MS,
+				stderr: 'combined',
+			})
+			if (setup === 'timeout' || setup.exitCode !== 0) {
+				const output = setup === 'timeout' ? 'timed out' : new TextDecoder().decode(setup.stdout)
+				throw new Error(`Template setup failed: ${output.slice(-2000)}`)
+			}
+			const snapshot = await container.snapshotContainer({
+				name: `sandbox-template-v${TEMPLATE_VERSION}`,
+			})
+			await this.ctx.storage.put(TEMPLATE_STORAGE_KEY, snapshot)
+			return snapshot
+		} finally {
+			await this.destroyContainer()
+		}
 	}
 
 	async container_ping(): Promise<string> {
-		const res = await proxyFetch(
-			this.env.ENVIRONMENT,
-			this.ctx.container,
-			new Request(`http://host:${OPEN_CONTAINER_PORT}/ping`),
-			OPEN_CONTAINER_PORT
-		)
-		if (!res || !res.ok) {
-			throw new Error(`Request to container failed: ${await res.text()}`)
-		}
-		return await res.text()
+		await this.run(['true'])
+		return 'pong!'
 	}
 
 	async container_exec(params: ExecParams): Promise<string> {
-		const res = await proxyFetch(
-			this.env.ENVIRONMENT,
-			this.ctx.container,
-			new Request(`http://host:${OPEN_CONTAINER_PORT}/exec`, {
-				method: 'POST',
-				body: JSON.stringify(params),
-				headers: {
-					'content-type': 'application/json',
-				},
-			}),
-			OPEN_CONTAINER_PORT
+		const timeoutMs = Math.min(params.timeout ?? DEFAULT_EXEC_TIMEOUT_MS, MAX_EXEC_TIMEOUT_MS)
+		const startedAt = Date.now()
+		// GNU timeout runs the command in its own process group and SIGKILLs the whole group, so
+		// children the command started die with it. The Worker-side timeout is only a backstop.
+		const result = await this.run(
+			['timeout', '--signal=KILL', `${timeoutMs / 1000}`, 'sh', '-c', params.args],
+			{
+				timeoutMs: timeoutMs + EXEC_TIMEOUT_BACKSTOP_MS,
+				stderr: params.streamStderr ? 'combined' : 'ignore',
+			}
 		)
-		if (!res || !res.ok) {
-			throw new Error(`Request to container failed: ${await res.text()}`)
+		if (result === 'timeout') {
+			return `Process killed after ${timeoutMs}ms timeout`
 		}
-		const txt = await res.text()
-		return txt
-	}
-
-	async container_ls(): Promise<FileList> {
-		const res = await proxyFetch(
-			this.env.ENVIRONMENT,
-			this.ctx.container,
-			new Request(`http://host:${OPEN_CONTAINER_PORT}/files/ls`),
-			OPEN_CONTAINER_PORT
-		)
-		if (!res || !res.ok) {
-			throw new Error(`Request to container failed: ${await res.text()}`)
+		const output = new TextDecoder().decode(result.stdout)
+		if (result.exitCode === SIGKILL_EXIT_CODE && Date.now() - startedAt >= timeoutMs) {
+			return `${output}Process killed after ${timeoutMs}ms timeout`
 		}
-		const json = (await res.json()) as FileList
-		return json
+		return `${output}Process exited with code: ${result.exitCode}`
 	}
 
 	async container_file_delete(filePath: string): Promise<boolean> {
-		const res = await proxyFetch(
-			this.env.ENVIRONMENT,
-			this.ctx.container,
-			new Request(`http://host:${OPEN_CONTAINER_PORT}/files/contents/${filePath}`, {
-				method: 'DELETE',
-			}),
-			OPEN_CONTAINER_PORT
-		)
-		return res.ok
+		const result = await this.runOrThrow(['rm', '-r', '--', toWorkdirPath(filePath)])
+		return result.exitCode === 0
 	}
-	async container_file_read(
-		filePath: string
-	): Promise<
-		| { type: 'text'; textOutput: string; mimeType: string | undefined }
-		| { type: 'base64'; base64Output: string; mimeType: string | undefined }
-	> {
-		const res = await proxyFetch(
-			this.env.ENVIRONMENT,
-			this.ctx.container,
-			new Request(`http://host:${OPEN_CONTAINER_PORT}/files/contents/${filePath}`),
-			OPEN_CONTAINER_PORT
-		)
-		if (!res || !res.ok) {
-			throw new Error(`Request to container failed: ${await res.text()}`)
+
+	async container_file_read(filePath: string): Promise<FileContents> {
+		const path = toWorkdirPath(filePath)
+		const kind = new TextDecoder()
+			.decode(
+				(
+					await this.runOrThrow([
+						'sh',
+						'-c',
+						'if [ -d "$1" ]; then echo dir; elif [ -f "$1" ]; then echo file; fi',
+						'sh',
+						path,
+					])
+				).stdout
+			)
+			.trim()
+
+		if (kind === 'dir') {
+			const listing = await this.runOrThrow(['find', path, '-mindepth', '1', '-maxdepth', '1'])
+			const uris = new TextDecoder()
+				.decode(listing.stdout)
+				.split('\n')
+				.filter(Boolean)
+				.map((entry) => `file:///${entry.replace(/^\.\//, '')}`)
+				.sort()
+			return { type: 'text', textOutput: uris.join('\n'), mimeType: DIRECTORY_CONTENT_TYPE }
+		}
+		if (kind !== 'file') {
+			throw new Error(`No such file or directory: ${filePath}`)
 		}
 
-		const mimeType = res.headers.get('Content-Type') ?? undefined
-		const blob = await res.blob()
-
-		if (mimeType && mimeType.startsWith('text')) {
-			return {
-				type: 'text',
-				textOutput: await blob.text(),
-				mimeType,
-			}
-		} else {
-			return {
-				type: 'base64',
-				base64Output: await fileToBase64(blob),
-				mimeType,
-			}
+		const contents = await this.runOrThrow(['cat', '--', path])
+		if (contents.exitCode !== 0) {
+			throw new Error(`Failed to read ${filePath}: ${contents.stderr}`)
 		}
+		const mimeType = mime.getType(path) ?? undefined
+		const text =
+			mimeType === undefined || mimeType.startsWith('text')
+				? decodeUtf8(contents.stdout)
+				: undefined
+		if (text !== undefined) {
+			return { type: 'text', textOutput: text, mimeType: mimeType ?? 'text/plain' }
+		}
+		return { type: 'base64', base64Output: bytesToBase64(contents.stdout), mimeType }
 	}
 
 	async container_file_write(file: FileWrite): Promise<string> {
-		const res = await proxyFetch(
-			this.env.ENVIRONMENT,
-			this.ctx.container,
-			new Request(`http://host:${OPEN_CONTAINER_PORT}/files/contents`, {
-				method: 'POST',
-				body: JSON.stringify(file),
-				headers: {
-					'content-type': 'application/json',
-				},
-			}),
-			OPEN_CONTAINER_PORT
+		const result = await this.runOrThrow(
+			['sh', '-c', 'mkdir -p "$(dirname "$1")" && cat > "$1"', 'sh', toWorkdirPath(file.path)],
+			{ stdin: file.text }
 		)
-		if (!res || !res.ok) {
-			throw new Error(`Request to container failed: ${await res.text()}`)
+		if (result.exitCode !== 0) {
+			throw new Error(`Failed to write ${file.path}: ${result.stderr}`)
 		}
 		return `Wrote file: ${file.path}`
+	}
+
+	private requireContainer(): Container {
+		const container = this.ctx.container
+		if (!container) {
+			throw new Error('ctx.container is undefined. Is UserContainer bound to a container?')
+		}
+		return container
+	}
+
+	/**
+	 * startContainer() inside blockConcurrencyWhile, so no request runs against a half-started
+	 * container. Returns the error rather than throwing it: a callback that throws resets the
+	 * Durable Object, and the caller could no longer recover.
+	 */
+	private async startBlockingRequests(source: StartOptions): Promise<unknown> {
+		let error: unknown
+		await this.ctx.blockConcurrencyWhile(async () => {
+			error = await this.startContainer(source)
+		})
+		return error
+	}
+
+	/**
+	 * Start a container and wait until it runs commands. A container can be briefly unavailable
+	 * after destroy(), and start() returns before the container is ready, so both are retried.
+	 * Returns undefined once it's ready, or the last error.
+	 */
+	private async startContainer(
+		source: StartOptions,
+		instance: InstanceType = INSTANCE
+	): Promise<unknown> {
+		const container = this.requireContainer()
+		let lastError: unknown
+		for (let attempt = 0; attempt < START_ATTEMPTS; attempt++) {
+			try {
+				if (!container.running) {
+					const options: SandboxStartOptions = {
+						...source,
+						instance,
+						enableInternet: true,
+						entrypoint: KEEP_ALIVE_ENTRYPOINT,
+					}
+					// The old @cloudflare/workers-types that agents pulls in also declares
+					// ContainerStartupOptions, without image, instance or containerSnapshot, and wins the
+					// merge. SandboxStartOptions carries the checking instead.
+					container.start(options as unknown as ContainerStartupOptions)
+					this.ctx.waitUntil(
+						container.monitor().catch((error) => console.error('Container exited', error))
+					)
+				}
+				await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS)
+				await this.runOrThrow(['true'], { cwd: '/' })
+				return undefined
+			} catch (error) {
+				lastError = error
+				await new Promise((resolve) => setTimeout(resolve, START_RETRY_DELAY_MS))
+			}
+		}
+		return lastError ?? new Error('Container did not start')
+	}
+
+	private async runOrThrow(
+		cmd: string[],
+		options: { stdin?: string; timeoutMs?: number; cwd?: string } = {}
+	): Promise<RunResult> {
+		const result = await this.run(cmd, options)
+		if (result === 'timeout') {
+			throw new Error(`Timed out running ${cmd[0]}`)
+		}
+		return result
+	}
+
+	/** Run a process in WORKDIR and collect its output, killing it after timeoutMs. */
+	private async run(
+		cmd: string[],
+		{
+			stdin,
+			timeoutMs = DEFAULT_EXEC_TIMEOUT_MS,
+			stderr = 'pipe',
+			cwd = WORKDIR,
+		}: {
+			stdin?: string
+			timeoutMs?: number
+			stderr?: 'pipe' | 'combined' | 'ignore'
+			cwd?: string
+		} = {}
+	): Promise<RunResult | 'timeout'> {
+		const container = this.requireContainer()
+		if (!container.running) {
+			throw new Error('Container is not running. Call container_initialize first.')
+		}
+
+		// Docs: pass an AbortController's signal, not AbortSignal.timeout(), and stop it once the
+		// process exits.
+		const controller = new AbortController()
+		const timer = setTimeout(() => controller.abort(), timeoutMs)
+		const timedOut = new Promise<'timeout'>((resolve) => {
+			controller.signal.addEventListener('abort', () => resolve('timeout'), { once: true })
+		})
+		try {
+			const proc = await container.exec(cmd, {
+				cwd,
+				env: EXEC_ENV,
+				stdin: stdin === undefined ? undefined : new Blob([stdin]).stream(),
+				stdout: 'pipe',
+				stderr,
+				signal: controller.signal,
+			})
+			const stdout = collectStream(proc.stdout)
+			const stderrOutput = collectStream(proc.stderr)
+			const exited = await Promise.race([proc.exitCode, timedOut])
+			if (exited === 'timeout' || controller.signal.aborted) {
+				stdout.cancel()
+				stderrOutput.cancel()
+				return 'timeout'
+			}
+			// A background process the command started keeps the pipes open after it exits (and the
+			// runtime then reports exitCode about 2s late). Read until the pipes close or go quiet, then
+			// leave that process running, like a shell does.
+			const drained = Promise.all([stdout.done, stderrOutput.done])
+			let closed = false
+			void drained.then(() => {
+				closed = true
+			})
+			while (
+				!closed &&
+				Date.now() - Math.max(stdout.lastChunkAt(), stderrOutput.lastChunkAt()) < OUTPUT_GRACE_MS
+			) {
+				await Promise.race([drained, new Promise((resolve) => setTimeout(resolve, 50))])
+			}
+			stdout.cancel()
+			stderrOutput.cancel()
+			return {
+				exitCode: exited,
+				stdout: stdout.bytes(),
+				stderr: new TextDecoder().decode(stderrOutput.bytes()),
+			}
+		} catch (error) {
+			if (controller.signal.aborted) {
+				return 'timeout'
+			}
+			throw error
+		} finally {
+			clearTimeout(timer)
+		}
 	}
 }

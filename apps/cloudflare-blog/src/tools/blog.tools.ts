@@ -1,5 +1,7 @@
 import { z } from 'zod'
 
+import { cloudflareFetch } from '@repo/mcp-common/src/user-agent'
+
 import {
 	BlogListCursorParam,
 	BlogListLimitParam,
@@ -8,7 +10,7 @@ import {
 	BlogSearchQueryParam,
 } from '../types/blog.types'
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import type { McpRegistrationContext } from '@repo/mcp-common/src/registration-context'
 
 interface RequiredEnv {
 	BLOG_BASE_URL: string
@@ -22,20 +24,20 @@ function formatError(message: string) {
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
-	const res = await fetch(url)
+	const res = await cloudflareFetch(url)
 	if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`)
 	return res.json() as Promise<T>
 }
 
 // ---- tool registrations ----------------------------------------------------
 
-export function registerBlogTools(server: McpServer, env: RequiredEnv) {
-	const blogBase = env.BLOG_BASE_URL.replace(/\/$/, '')
-	const searchBase = env.SEARCH_BASE_URL.replace(/\/$/, '')
+export function registerBlogTools<Env extends RequiredEnv>(context: McpRegistrationContext<Env>) {
+	const blogBase = context.env.BLOG_BASE_URL.replace(/\/$/, '')
+	const searchBase = context.env.SEARCH_BASE_URL.replace(/\/$/, '')
 
 	// ---- search_posts -------------------------------------------------------
 
-	server.registerTool(
+	context.registerTool(
 		'search_posts',
 		{
 			description: `Search the Cloudflare Blog using semantic search.
@@ -47,10 +49,10 @@ Examples of good queries:
 - "Workers KV storage limits"
 - "DDoS protection announcements 2024"
 - "how Cloudflare uses Rust"`,
-			inputSchema: {
+			inputSchema: z.object({
 				query: BlogSearchQueryParam,
-			},
-			outputSchema: {
+			}),
+			outputSchema: z.object({
 				results: z.array(
 					z.object({
 						url: z.string().describe('URL to the full blog post'),
@@ -59,12 +61,12 @@ Examples of good queries:
 						score: z.number().describe('Relevance score'),
 					})
 				),
-			},
+			}),
 			annotations: { title: 'Search Cloudflare Blog', readOnlyHint: true },
 		},
 		async ({ query }) => {
 			try {
-				const res = await fetch(`${searchBase}/search`, {
+				const res = await cloudflareFetch(`${searchBase}/search`, {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({ query }),
@@ -129,18 +131,18 @@ Examples of good queries:
 
 	// ---- list_posts ---------------------------------------------------------
 
-	server.registerTool(
+	context.registerTool(
 		'list_posts',
 		{
 			description: `List Cloudflare Blog posts in reverse chronological order.
 
 Optionally filter by tag. Use the returned nextCursor to paginate through results.`,
-			inputSchema: {
+			inputSchema: z.object({
 				limit: BlogListLimitParam,
 				cursor: BlogListCursorParam,
 				tag: BlogListTagParam,
-			},
-			outputSchema: {
+			}),
+			outputSchema: z.object({
 				posts: z.array(
 					z.object({
 						slug: z.string(),
@@ -153,7 +155,7 @@ Optionally filter by tag. Use the returned nextCursor to paginate through result
 					})
 				),
 				nextCursor: z.string().nullable(),
-			},
+			}),
 			annotations: { title: 'List blog posts', readOnlyHint: true },
 		},
 		async ({ limit, cursor, tag }) => {
@@ -179,16 +181,16 @@ Optionally filter by tag. Use the returned nextCursor to paginate through result
 
 	// ---- get_post -----------------------------------------------------------
 
-	server.registerTool(
+	context.registerTool(
 		'get_post',
 		{
 			description: `Get a single Cloudflare Blog post by slug, including its full HTML content.
 
 Use the slug from a list_posts or search_posts result.`,
-			inputSchema: {
+			inputSchema: z.object({
 				slug: BlogPostSlugParam,
-			},
-			outputSchema: {
+			}),
+			outputSchema: z.object({
 				slug: z.string(),
 				title: z.string(),
 				excerpt: z.string(),
@@ -197,7 +199,7 @@ Use the slug from a list_posts or search_posts result.`,
 				tags: z.array(z.string()),
 				authors: z.array(z.string()),
 				content: z.string().describe('Full post content as HTML'),
-			},
+			}),
 			annotations: { title: 'Get blog post', readOnlyHint: true },
 		},
 		async ({ slug }) => {
@@ -217,21 +219,21 @@ Use the slug from a list_posts or search_posts result.`,
 
 	// ---- list_tags ----------------------------------------------------------
 
-	server.registerTool(
+	context.registerTool(
 		'list_tags',
 		{
 			description: `List all tags used on the Cloudflare Blog.
 
 Use the returned slugs to filter list_posts by topic, e.g. "workers", "zero-trust", "radar".`,
-			inputSchema: {},
-			outputSchema: {
+			inputSchema: z.object({}),
+			outputSchema: z.object({
 				tags: z.array(
 					z.object({
 						slug: z.string(),
 						label: z.string(),
 					})
 				),
-			},
+			}),
 			annotations: { title: 'List blog tags', readOnlyHint: true },
 		},
 		async () => {

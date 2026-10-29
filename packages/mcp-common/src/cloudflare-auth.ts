@@ -1,8 +1,7 @@
 import { z } from 'zod'
 
 import { McpError, safeStatusCode } from './mcp-error'
-
-import type { AuthRequest } from '@cloudflare/workers-oauth-provider'
+import { cloudflareFetch } from './user-agent'
 
 /** Maps known OAuth error codes to safe client-facing messages */
 const SAFE_TOKEN_ERROR_MESSAGES: Record<string, string> = {
@@ -110,14 +109,9 @@ function generateAuthUrl({
 }
 
 /**
- * Constructs an authorization URL for Cloudflare.
+ * Constructs the Cloudflare authorization URL.
  *
- * @param {Object} options
- * @param {string} options.client_id - The client ID of the application.
- * @param {string} options.redirect_uri - The redirect URI of the application.
- * @param {string} [options.state] - The state parameter.
- *
- * @returns {string} The authorization URL.
+ * @param state - the opaque `state` from `beginUpstream()`, bound to the user's browser
  */
 export async function getAuthorizationURL({
 	client_id,
@@ -128,7 +122,7 @@ export async function getAuthorizationURL({
 }: {
 	client_id: string
 	redirect_uri: string
-	state: AuthRequest
+	state: string
 	scopes: Record<string, string>
 	codeChallenge: string
 }): Promise<{ authUrl: string }> {
@@ -136,7 +130,7 @@ export async function getAuthorizationURL({
 		authUrl: generateAuthUrl({
 			client_id,
 			redirect_uri,
-			state: btoa(JSON.stringify(state)),
+			state,
 			code_challenge: codeChallenge,
 			scopes,
 		}),
@@ -186,7 +180,7 @@ export async function getAuthToken({
 		code,
 		code_verifier,
 	}).toString()
-	const resp = await fetch('https://dash.cloudflare.com/oauth2/token', {
+	const resp = await cloudflareFetch('https://dash.cloudflare.com/oauth2/token', {
 		method: 'POST',
 		headers: {
 			Authorization: `Basic ${btoa(`${client_id}:${client_secret}`)}`,
@@ -217,7 +211,7 @@ export async function refreshAuthToken({
 		refresh_token,
 	})
 
-	const resp = await fetch('https://dash.cloudflare.com/oauth2/token', {
+	const resp = await cloudflareFetch('https://dash.cloudflare.com/oauth2/token', {
 		method: 'POST',
 		body: params.toString(),
 		headers: {
