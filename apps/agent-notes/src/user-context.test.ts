@@ -47,4 +47,17 @@ describe('buildUserContext', () => {
 		expect(context.accountId).toBe('account-a')
 		expect(idFromName).toHaveBeenCalledWith('account-a')
 	})
+
+	it('forwards the Worker execution context for background webhook delivery', () => {
+		const props: AuthProps = {
+			type: 'user_token',
+			accessToken: 'token',
+			user: { id: 'user-1', email: 'test@example.com' },
+			accounts: [{ id: 'account-a', name: 'A' }],
+		}
+		const { env } = envWithIndexSpy()
+		const executionCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext
+
+		expect(buildUserContext(env, props, 'account-a', executionCtx).executionCtx).toBe(executionCtx)
+	})
 })

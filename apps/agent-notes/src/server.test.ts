@@ -165,6 +165,7 @@ describe('Agent Notes account-scoped tool wrapper', () => {
 		const result = await read({ path: 'memory/a.md' }, 'account-1', {} as never)
 
 		expect(result).toHaveProperty('isError', true)
+		expect(JSON.stringify(result)).toContain('Authenticated request props are required')
 		expect(fetchMock).not.toHaveBeenCalled()
 	})
 })
